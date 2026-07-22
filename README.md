@@ -1,35 +1,34 @@
-# React + TypeScript + Vite
+# Workout Notes
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A private workout tracker for a three-person crew.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- React + TypeScript + Vite
+- Tailwind CSS
+- React Router
+- TanStack Query
+- React Hook Form + Zod
+- Supabase Auth + Postgres
+- Vercel-ready static deployment
 
-## React Compiler
+## Local Setup
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+1. Create a Supabase project.
+2. In the Supabase SQL editor, run `supabase/schema.sql`.
+3. Replace the three placeholder emails in `public.approved_users`.
+4. In Supabase Authentication settings, enable Email signups and Email/password sign-ins.
+5. Copy `.env.example` to `.env.local` and fill in:
 
-Note: This will impact Vite dev & build performances.
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_ANON_KEY=...
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
-# workout-notes
+6. Run the app:
+
+```bash
+npm run dev
+```
+
+Only authenticated users whose email exists in `approved_users` can read or write workouts.
