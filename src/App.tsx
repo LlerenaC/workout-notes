@@ -10,12 +10,13 @@ import { supabase } from './lib/supabase'
 import type { Profile, Workout } from './types'
 
 const workoutSchema = z.object({
-  display_name: z.string().trim().min(2, 'Enter the name to show on this workout.').max(80),
   title: z.string().min(2, 'Give the workout a short title.'),
   workout_date: z.string().min(1, 'Pick a date.'),
   duration_minutes: z.coerce.number().int().min(1).max(600),
   notes: z.string().max(2000).optional(),
 })
+
+const displayNameSchema = z.string().trim().min(2, 'Display name must be at least 2 characters.').max(80)
 
 type WorkoutFormInput = z.input<typeof workoutSchema>
 type WorkoutFormValues = z.output<typeof workoutSchema>
@@ -130,6 +131,7 @@ function Dashboard({
   session: Session
 }) {
   const queryClient = useQueryClient()
+  const [workoutFormVersion, setWorkoutFormVersion] = useState(0)
   const profileQuery = useProfile(session.user.id)
   const crewProfilesQuery = useCrewProfiles(Boolean(profileQuery.data))
   const workoutsQuery = useWorkouts(Boolean(profileQuery.data))
@@ -144,9 +146,9 @@ function Dashboard({
   )
 
   const createWorkout = useMutation({
-    mutationFn: async (values: WorkoutFormValues) => {
+    mutationFn: async ({ displayName, ...values }: WorkoutFormValues & { displayName: string }) => {
       const { error } = await supabase.from('workouts').insert({
-        display_name: values.display_name,
+        display_name: displayName,
         title: values.title,
         workout_date: values.workout_date,
         duration_minutes: values.duration_minutes,
@@ -157,7 +159,32 @@ function Dashboard({
         throw error
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['workouts'] }),
+    onSuccess: () => {
+      setWorkoutFormVersion((version) => version + 1)
+      void queryClient.invalidateQueries({ queryKey: ['workouts'] })
+    },
+  })
+
+  const updateDisplayName = useMutation({
+    mutationFn: async (displayName: string) => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .update({ display_name: displayName })
+        .eq('id', session.user.id)
+        .select('id')
+
+      if (error) {
+        throw error
+      }
+
+      if (data.length === 0) {
+        throw new Error('Your display name could not be updated. Confirm the profile update policy has been applied in Supabase.')
+      }
+    },
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['profile', session.user.id] }),
+      queryClient.invalidateQueries({ queryKey: ['crew-profiles'] }),
+    ]),
   })
 
   if (profileQuery.isLoading) {
@@ -191,8 +218,15 @@ function Dashboard({
     )
   }
 
+  const currentProfile = profileQuery.data
+
+  const submitWorkout = (values: WorkoutFormValues) => createWorkout.mutateAsync({
+    ...values,
+    displayName: currentProfile.display_name,
+  })
+
   const submitMobileWorkout = async (values: WorkoutFormValues) => {
-    await createWorkout.mutateAsync(values)
+    await submitWorkout(values)
     onCloseWorkoutForm()
   }
 
@@ -212,15 +246,20 @@ function Dashboard({
         {workoutsQuery.isLoading || crewProfilesQuery.isLoading ? (
           <StatusScreen title="Loading" message="Pulling recent workouts..." />
         ) : (
-          <WorkoutFeed columns={crewColumns} defaultUserId={profileQuery.data.id} />
+          <WorkoutFeed
+            columns={crewColumns}
+            currentUserId={profileQuery.data.id}
+            isUpdatingDisplayName={updateDisplayName.isPending}
+            onUpdateDisplayName={(displayName) => updateDisplayName.mutateAsync(displayName)}
+          />
         )}
       </section>
 
       <aside className="hidden md:block">
         <WorkoutForm
-          defaultDisplayName={profileQuery.data.display_name}
           isSaving={createWorkout.isPending}
-          onSubmit={(values) => createWorkout.mutateAsync(values)}
+          key={workoutFormVersion}
+          onSubmit={submitWorkout}
         />
         {createWorkout.error ? (
           <p className="mt-3 rounded bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -230,7 +269,6 @@ function Dashboard({
       </aside>
       </div>
       <WorkoutFormModal
-        defaultDisplayName={profileQuery.data.display_name}
         errorMessage={createWorkout.error?.message}
         isOpen={isWorkoutFormOpen}
         isSaving={createWorkout.isPending}
@@ -313,12 +351,10 @@ function useCrewProfiles(enabled: boolean) {
 }
 
 function WorkoutForm({
-  defaultDisplayName,
   embedded = false,
   isSaving,
   onSubmit,
 }: {
-  defaultDisplayName: string
   embedded?: boolean
   isSaving: boolean
   onSubmit: (values: WorkoutFormValues) => Promise<void>
@@ -330,7 +366,6 @@ function WorkoutForm({
     reset,
   } = useForm<WorkoutFormInput, unknown, WorkoutFormValues>({
     defaultValues: {
-      display_name: defaultDisplayName,
       duration_minutes: 45,
       notes: '',
       title: '',
@@ -342,7 +377,6 @@ function WorkoutForm({
   const submit = async (values: WorkoutFormValues) => {
     await onSubmit(values)
     reset({
-      display_name: defaultDisplayName,
       duration_minutes: 45,
       notes: '',
       title: '',
@@ -354,11 +388,6 @@ function WorkoutForm({
     <form className={embedded ? '' : 'rounded border border-stone-200 bg-white p-5 shadow-sm'} onSubmit={handleSubmit(submit)}>
       {embedded ? null : <h2 className="text-xl font-semibold">Log workout</h2>}
       <div className={embedded ? 'space-y-4' : 'mt-5 space-y-4'}>
-        <label className="form-field">
-          <span>Display name</span>
-          <input placeholder="Your name" {...register('display_name')} />
-          {errors.display_name ? <small>{errors.display_name.message}</small> : null}
-        </label>
         <label className="form-field">
           <span>Title</span>
           <input placeholder="Push day, 5k run, legs..." {...register('title')} />
@@ -390,14 +419,12 @@ function WorkoutForm({
 }
 
 function WorkoutFormModal({
-  defaultDisplayName,
   errorMessage,
   isOpen,
   isSaving,
   onClose,
   onSubmit,
 }: {
-  defaultDisplayName: string
   errorMessage?: string
   isOpen: boolean
   isSaving: boolean
@@ -438,7 +465,6 @@ function WorkoutFormModal({
           <button aria-label="Close workout form" className="button-secondary" disabled={isSaving} type="button" onClick={onClose}>Close</button>
         </div>
         <WorkoutForm
-          defaultDisplayName={defaultDisplayName}
           embedded
           isSaving={isSaving}
           onSubmit={onSubmit}
@@ -477,7 +503,17 @@ function createCrewColumns(profiles: Profile[], workouts: Workout[]): CrewColumn
   return Array.from(columnsByUserId.values())
 }
 
-function WorkoutFeed({ columns, defaultUserId }: { columns: CrewColumn[]; defaultUserId: string }) {
+function WorkoutFeed({
+  columns,
+  currentUserId,
+  isUpdatingDisplayName,
+  onUpdateDisplayName,
+}: {
+  columns: CrewColumn[]
+  currentUserId: string
+  isUpdatingDisplayName: boolean
+  onUpdateDisplayName: (displayName: string) => Promise<void>
+}) {
   if (columns.length === 0) {
     return (
       <div className="rounded border border-dashed border-stone-300 bg-white p-8 text-center">
@@ -489,16 +525,39 @@ function WorkoutFeed({ columns, defaultUserId }: { columns: CrewColumn[]; defaul
 
   return (
     <>
-      <MobileWorkoutFeed columns={columns} defaultUserId={defaultUserId} />
+      <MobileWorkoutFeed
+        columns={columns}
+        currentUserId={currentUserId}
+        isUpdatingDisplayName={isUpdatingDisplayName}
+        onUpdateDisplayName={onUpdateDisplayName}
+      />
       <div className="hidden gap-4 md:grid md:grid-cols-2 xl:grid-cols-3">
-        {columns.map((column) => <WorkoutColumnCard key={column.profile.id} column={column} />)}
+        {columns.map((column) => (
+          <WorkoutColumnCard
+            column={column}
+            isCurrentUser={column.profile.id === currentUserId}
+            isUpdatingDisplayName={isUpdatingDisplayName}
+            key={column.profile.id}
+            onUpdateDisplayName={onUpdateDisplayName}
+          />
+        ))}
       </div>
     </>
   )
 }
 
-function MobileWorkoutFeed({ columns, defaultUserId }: { columns: CrewColumn[]; defaultUserId: string }) {
-  const [selectedUserId, setSelectedUserId] = useState(defaultUserId)
+function MobileWorkoutFeed({
+  columns,
+  currentUserId,
+  isUpdatingDisplayName,
+  onUpdateDisplayName,
+}: {
+  columns: CrewColumn[]
+  currentUserId: string
+  isUpdatingDisplayName: boolean
+  onUpdateDisplayName: (displayName: string) => Promise<void>
+}) {
+  const [selectedUserId, setSelectedUserId] = useState(currentUserId)
   const selectedColumn = columns.find((column) => column.profile.id === selectedUserId) ?? columns[0]
 
   return (
@@ -530,17 +589,40 @@ function MobileWorkoutFeed({ columns, defaultUserId }: { columns: CrewColumn[]; 
         id={`member-workouts-${selectedColumn.profile.id}`}
         role="tabpanel"
       >
-        <WorkoutColumnCard column={selectedColumn} />
+        <WorkoutColumnCard
+          column={selectedColumn}
+          isCurrentUser={selectedColumn.profile.id === currentUserId}
+          isUpdatingDisplayName={isUpdatingDisplayName}
+          onUpdateDisplayName={onUpdateDisplayName}
+        />
       </div>
     </div>
   )
 }
 
-function WorkoutColumnCard({ column }: { column: CrewColumn }) {
+function WorkoutColumnCard({
+  column,
+  isCurrentUser,
+  isUpdatingDisplayName,
+  onUpdateDisplayName,
+}: {
+  column: CrewColumn
+  isCurrentUser: boolean
+  isUpdatingDisplayName: boolean
+  onUpdateDisplayName: (displayName: string) => Promise<void>
+}) {
   return (
     <section className="overflow-hidden rounded border border-stone-200 bg-white shadow-sm">
       <header className="border-b border-stone-200 bg-stone-50 p-4">
-        <h3 className="break-words text-xl font-semibold">{column.profile.display_name}</h3>
+        {isCurrentUser ? (
+          <EditableDisplayName
+            displayName={column.profile.display_name}
+            isSaving={isUpdatingDisplayName}
+            onSave={onUpdateDisplayName}
+          />
+        ) : (
+          <h3 className="break-words text-xl font-semibold">{column.profile.display_name}</h3>
+        )}
         <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm text-stone-600">
           <span><strong className="font-semibold text-stone-950">{column.workouts.length}</strong> workouts</span>
           <span><strong className="font-semibold text-stone-950">{column.totalMinutes}</strong> min</span>
@@ -567,6 +649,84 @@ function WorkoutColumnCard({ column }: { column: CrewColumn }) {
         </div>
       )}
     </section>
+  )
+}
+
+function EditableDisplayName({
+  displayName,
+  isSaving,
+  onSave,
+}: {
+  displayName: string
+  isSaving: boolean
+  onSave: (displayName: string) => Promise<void>
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const [value, setValue] = useState(displayName)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isEditing) {
+      setValue(displayName)
+    }
+  }, [displayName, isEditing])
+
+  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const parsedDisplayName = displayNameSchema.safeParse(value)
+
+    if (!parsedDisplayName.success) {
+      setError(parsedDisplayName.error.issues[0]?.message ?? 'Enter a valid display name.')
+      return
+    }
+
+    setError(null)
+
+    try {
+      await onSave(parsedDisplayName.data)
+      setIsEditing(false)
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Could not update your display name.')
+    }
+  }
+
+  if (isEditing) {
+    return (
+      <form className="flex flex-wrap items-start gap-2" onSubmit={save}>
+        <label className="min-w-0 flex-1">
+          <span className="sr-only">Display name</span>
+          <input aria-invalid={Boolean(error)} className="w-full" value={value} onChange={(event) => setValue(event.target.value)} />
+        </label>
+        <button className="button-primary" disabled={isSaving} type="submit">{isSaving ? 'Saving...' : 'Save'}</button>
+        <button
+          className="button-secondary"
+          disabled={isSaving}
+          type="button"
+          onClick={() => {
+            setValue(displayName)
+            setError(null)
+            setIsEditing(false)
+          }}
+        >
+          Cancel
+        </button>
+        {error ? <p className="w-full text-sm text-red-700">{error}</p> : null}
+      </form>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <h3 className="break-words text-xl font-semibold">{displayName}</h3>
+      <button
+        aria-label="Edit display name"
+        className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+        type="button"
+        onClick={() => setIsEditing(true)}
+      >
+        <span aria-hidden="true">✎</span>
+      </button>
+    </div>
   )
 }
 

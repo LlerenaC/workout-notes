@@ -87,8 +87,7 @@ begin
     insert into public.profiles (id, email, display_name)
     values (new.id, new.email, approved.display_name)
     on conflict (id) do update
-      set email = excluded.email,
-          display_name = excluded.display_name;
+      set email = excluded.email;
   end if;
 
   return new;
@@ -125,8 +124,7 @@ begin
   insert into public.profiles (id, email, display_name)
   values (auth.uid(), current_email, approved.display_name)
   on conflict (id) do update
-    set email = excluded.email,
-        display_name = excluded.display_name;
+    set email = excluded.email;
 
   return query
     select synced_profiles.id as profile_id, synced_profiles.display_name
@@ -144,6 +142,14 @@ create policy "Approved members can read profiles"
   for select
   to authenticated
   using (public.is_approved_member());
+
+drop policy if exists "Approved members can update own profile" on public.profiles;
+create policy "Approved members can update own profile"
+  on public.profiles
+  for update
+  to authenticated
+  using (id = auth.uid() and public.is_approved_member())
+  with check (id = auth.uid() and public.is_approved_member());
 
 drop policy if exists "Approved members can read workouts" on public.workouts;
 create policy "Approved members can read workouts"
@@ -187,5 +193,4 @@ select auth_users.id, auth_users.email, approved_users.display_name
 from auth.users auth_users
 join public.approved_users approved_users on approved_users.email = auth_users.email
 on conflict (id) do update
-  set email = excluded.email,
-      display_name = excluded.display_name;
+  set email = excluded.email;
