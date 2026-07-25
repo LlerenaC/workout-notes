@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom'
 import { z } from 'zod'
+import { Login } from './Login'
 import { supabase } from './lib/supabase'
 import type { Profile, Workout } from './types'
 
@@ -16,25 +17,15 @@ const workoutSchema = z.object({
   notes: z.string().max(2000).optional(),
 })
 
-const loginSchema = z.object({
-  email: z.string().email('Enter a valid email address.'),
-  password: z.string().min(6, 'Password must be at least 6 characters.'),
-})
-
-const magicLinkSchema = z.object({
-  email: z.string().email('Enter a valid email address.'),
-})
-
 type WorkoutFormInput = z.input<typeof workoutSchema>
 type WorkoutFormValues = z.output<typeof workoutSchema>
-type LoginFormValues = z.infer<typeof loginSchema>
-type MagicLinkFormValues = z.infer<typeof magicLinkSchema>
 
 const today = new Date().toISOString().slice(0, 10)
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(false)
+  const [isWorkoutFormOpen, setIsWorkoutFormOpen] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -47,6 +38,9 @@ function App() {
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession)
       setAuthReady(true)
+      if (!nextSession) {
+        setIsWorkoutFormOpen(false)
+      }
     })
 
     return () => subscription.unsubscribe()
@@ -54,7 +48,7 @@ function App() {
 
   return (
     <BrowserRouter>
-      <Shell session={session}>
+      <Shell session={session} onOpenWorkoutForm={() => setIsWorkoutFormOpen(true)}>
         {!authReady ? (
           <StatusScreen title="Loading" message="Checking your session..." />
         ) : (
@@ -65,7 +59,13 @@ function App() {
             />
             <Route
               path="/"
-              element={session ? <Dashboard session={session} /> : <Navigate to="/login" replace />}
+              element={session ? (
+                <Dashboard
+                  isWorkoutFormOpen={isWorkoutFormOpen}
+                  onCloseWorkoutForm={() => setIsWorkoutFormOpen(false)}
+                  session={session}
+                />
+              ) : <Navigate to="/login" replace />}
             />
           </Routes>
         )}
@@ -74,7 +74,15 @@ function App() {
   )
 }
 
-function Shell({ children, session }: { children: React.ReactNode; session?: Session | null }) {
+function Shell({
+  children,
+  onOpenWorkoutForm,
+  session,
+}: {
+  children: React.ReactNode
+  onOpenWorkoutForm: () => void
+  session?: Session | null
+}) {
   const queryClient = useQueryClient()
 
   const signOut = async () => {
@@ -96,9 +104,14 @@ function Shell({ children, session }: { children: React.ReactNode; session?: Ses
             </div>
           </Link>
           {session ? (
-            <button className="button-secondary shrink-0" type="button" onClick={signOut}>
-              Sign out
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <button className="button-primary md:hidden" type="button" onClick={onOpenWorkoutForm}>
+                + Log
+              </button>
+              <button className="button-secondary" type="button" onClick={signOut}>
+                Sign out
+              </button>
+            </div>
           ) : null}
         </div>
       </header>
@@ -107,139 +120,15 @@ function Shell({ children, session }: { children: React.ReactNode; session?: Ses
   )
 }
 
-function Login() {
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin')
-  const [authError, setAuthError] = useState<string | null>(null)
-  const [sentTo, setSentTo] = useState<string | null>(null)
-  const signInForm = useForm<LoginFormValues>({
-    resolver: zodResolver(loginSchema),
-  })
-  const magicLinkForm = useForm<MagicLinkFormValues>({
-    resolver: zodResolver(magicLinkSchema),
-  })
-
-  const signIn = async ({ email, password }: LoginFormValues) => {
-    setAuthError(null)
-    setSentTo(null)
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    })
-
-    if (error) {
-      setAuthError(error.message)
-    }
-  }
-
-  const sendMagicLink = async ({ email }: MagicLinkFormValues) => {
-    setAuthError(null)
-    setSentTo(null)
-
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        emailRedirectTo: window.location.origin,
-        shouldCreateUser: true,
-      },
-    })
-
-    if (error) {
-      setAuthError(error.message)
-      return
-    }
-
-    setSentTo(email)
-  }
-
-  return (
-    <section className="grid min-h-[calc(100vh-140px)] place-items-center">
-      <div className="w-full max-w-md rounded border border-stone-200 bg-white p-5 shadow-sm sm:p-6">
-        <h2 className="text-2xl font-semibold">
-          {mode === 'signin' ? 'Sign in' : 'Create access'}
-        </h2>
-        <p className="mt-2 text-sm text-stone-600">
-          {mode === 'signin'
-            ? 'Use your email and password once your account is set up.'
-            : 'Use one of the three approved emails and Supabase will send a magic link.'}
-        </p>
-
-        <div className="mt-5 grid grid-cols-2 rounded border border-stone-200 bg-stone-100 p-1">
-          <button
-            className={mode === 'signin' ? 'auth-tab-active' : 'auth-tab'}
-            type="button"
-            onClick={() => {
-              setMode('signin')
-              setAuthError(null)
-              setSentTo(null)
-            }}
-          >
-            Sign in
-          </button>
-          <button
-            className={mode === 'signup' ? 'auth-tab-active' : 'auth-tab'}
-            type="button"
-            onClick={() => {
-              setMode('signup')
-              setAuthError(null)
-              setSentTo(null)
-            }}
-          >
-            Sign up
-          </button>
-        </div>
-
-        {mode === 'signin' ? (
-          <form className="mt-6 space-y-4" onSubmit={signInForm.handleSubmit(signIn)}>
-            <label className="form-field">
-              <span>Email</span>
-              <input type="email" placeholder="you@example.com" {...signInForm.register('email')} />
-              {signInForm.formState.errors.email ? (
-                <small>{signInForm.formState.errors.email.message}</small>
-              ) : null}
-            </label>
-            <label className="form-field">
-              <span>Password</span>
-              <input type="password" placeholder="Your password" {...signInForm.register('password')} />
-              {signInForm.formState.errors.password ? (
-                <small>{signInForm.formState.errors.password.message}</small>
-              ) : null}
-            </label>
-            <button className="button-primary w-full" disabled={signInForm.formState.isSubmitting} type="submit">
-              {signInForm.formState.isSubmitting ? 'Signing in...' : 'Sign in'}
-            </button>
-          </form>
-        ) : (
-          <form className="mt-6 space-y-4" onSubmit={magicLinkForm.handleSubmit(sendMagicLink)}>
-            <label className="form-field">
-              <span>Email</span>
-              <input type="email" placeholder="you@example.com" {...magicLinkForm.register('email')} />
-              {magicLinkForm.formState.errors.email ? (
-                <small>{magicLinkForm.formState.errors.email.message}</small>
-              ) : null}
-            </label>
-            <button className="button-primary w-full" disabled={magicLinkForm.formState.isSubmitting} type="submit">
-              {magicLinkForm.formState.isSubmitting ? 'Sending...' : 'Send signup link'}
-            </button>
-          </form>
-        )}
-
-        {authError ? (
-          <p className="mt-4 rounded bg-red-50 px-3 py-2 text-sm text-red-700">
-            {authError}
-          </p>
-        ) : null}
-        {sentTo ? (
-          <p className="mt-4 rounded bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-            Check {sentTo} for your signup link.
-          </p>
-        ) : null}
-      </div>
-    </section>
-  )
-}
-
-function Dashboard({ session }: { session: Session }) {
+function Dashboard({
+  isWorkoutFormOpen,
+  onCloseWorkoutForm,
+  session,
+}: {
+  isWorkoutFormOpen: boolean
+  onCloseWorkoutForm: () => void
+  session: Session
+}) {
   const queryClient = useQueryClient()
   const profileQuery = useProfile(session.user.id)
   const crewProfilesQuery = useCrewProfiles(Boolean(profileQuery.data))
@@ -302,8 +191,14 @@ function Dashboard({ session }: { session: Session }) {
     )
   }
 
+  const submitMobileWorkout = async (values: WorkoutFormValues) => {
+    await createWorkout.mutateAsync(values)
+    onCloseWorkoutForm()
+  }
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+    <>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
       <section className="space-y-4">
         <div className="rounded border border-stone-200 bg-white p-5">
           <p className="text-sm text-stone-500">Signed in as {profileQuery.data.display_name}</p>
@@ -317,11 +212,11 @@ function Dashboard({ session }: { session: Session }) {
         {workoutsQuery.isLoading || crewProfilesQuery.isLoading ? (
           <StatusScreen title="Loading" message="Pulling recent workouts..." />
         ) : (
-          <WorkoutFeed columns={crewColumns} />
+          <WorkoutFeed columns={crewColumns} defaultUserId={profileQuery.data.id} />
         )}
       </section>
 
-      <aside>
+      <aside className="hidden md:block">
         <WorkoutForm
           defaultDisplayName={profileQuery.data.display_name}
           isSaving={createWorkout.isPending}
@@ -333,7 +228,16 @@ function Dashboard({ session }: { session: Session }) {
           </p>
         ) : null}
       </aside>
-    </div>
+      </div>
+      <WorkoutFormModal
+        defaultDisplayName={profileQuery.data.display_name}
+        errorMessage={createWorkout.error?.message}
+        isOpen={isWorkoutFormOpen}
+        isSaving={createWorkout.isPending}
+        onClose={onCloseWorkoutForm}
+        onSubmit={submitMobileWorkout}
+      />
+    </>
   )
 }
 
@@ -410,10 +314,12 @@ function useCrewProfiles(enabled: boolean) {
 
 function WorkoutForm({
   defaultDisplayName,
+  embedded = false,
   isSaving,
   onSubmit,
 }: {
   defaultDisplayName: string
+  embedded?: boolean
   isSaving: boolean
   onSubmit: (values: WorkoutFormValues) => Promise<void>
 }) {
@@ -445,9 +351,9 @@ function WorkoutForm({
   }
 
   return (
-    <form className="rounded border border-stone-200 bg-white p-5 shadow-sm" onSubmit={handleSubmit(submit)}>
-      <h2 className="text-xl font-semibold">Log workout</h2>
-      <div className="mt-5 space-y-4">
+    <form className={embedded ? '' : 'rounded border border-stone-200 bg-white p-5 shadow-sm'} onSubmit={handleSubmit(submit)}>
+      {embedded ? null : <h2 className="text-xl font-semibold">Log workout</h2>}
+      <div className={embedded ? 'space-y-4' : 'mt-5 space-y-4'}>
         <label className="form-field">
           <span>Display name</span>
           <input placeholder="Your name" {...register('display_name')} />
@@ -483,6 +389,68 @@ function WorkoutForm({
   )
 }
 
+function WorkoutFormModal({
+  defaultDisplayName,
+  errorMessage,
+  isOpen,
+  isSaving,
+  onClose,
+  onSubmit,
+}: {
+  defaultDisplayName: string
+  errorMessage?: string
+  isOpen: boolean
+  isSaving: boolean
+  onClose: () => void
+  onSubmit: (values: WorkoutFormValues) => Promise<void>
+}) {
+  useEffect(() => {
+    if (!isOpen) {
+      return
+    }
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !isSaving) {
+        onClose()
+      }
+    }
+
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [isOpen, isSaving, onClose])
+
+  if (!isOpen) {
+    return null
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-stone-950/40 p-4 md:hidden"
+      onMouseDown={(event) => {
+        if (!isSaving && event.target === event.currentTarget) {
+          onClose()
+        }
+      }}
+    >
+      <div aria-labelledby="mobile-workout-form-title" aria-modal="true" className="max-h-full w-full max-w-md overflow-y-auto rounded border border-stone-200 bg-white p-5 shadow-xl" role="dialog">
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <h2 className="text-xl font-semibold" id="mobile-workout-form-title">Log workout</h2>
+          <button aria-label="Close workout form" className="button-secondary" disabled={isSaving} type="button" onClick={onClose}>Close</button>
+        </div>
+        <WorkoutForm
+          defaultDisplayName={defaultDisplayName}
+          embedded
+          isSaving={isSaving}
+          onSubmit={onSubmit}
+        />
+        {errorMessage ? (
+          <p className="mt-3 rounded bg-red-50 px-3 py-2 text-sm text-red-700">{errorMessage}</p>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 type CrewColumn = {
   profile: Profile
   workouts: Workout[]
@@ -509,7 +477,7 @@ function createCrewColumns(profiles: Profile[], workouts: Workout[]): CrewColumn
   return Array.from(columnsByUserId.values())
 }
 
-function WorkoutFeed({ columns }: { columns: CrewColumn[] }) {
+function WorkoutFeed({ columns, defaultUserId }: { columns: CrewColumn[]; defaultUserId: string }) {
   if (columns.length === 0) {
     return (
       <div className="rounded border border-dashed border-stone-300 bg-white p-8 text-center">
@@ -520,39 +488,85 @@ function WorkoutFeed({ columns }: { columns: CrewColumn[] }) {
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {columns.map((column) => (
-        <section key={column.profile.id} className="overflow-hidden rounded border border-stone-200 bg-white shadow-sm">
-          <header className="border-b border-stone-200 bg-stone-50 p-4">
-            <h3 className="break-words text-xl font-semibold">{column.profile.display_name}</h3>
-            <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm text-stone-600">
-              <span><strong className="font-semibold text-stone-950">{column.workouts.length}</strong> workouts</span>
-              <span><strong className="font-semibold text-stone-950">{column.totalMinutes}</strong> min</span>
-            </div>
-          </header>
-          {column.workouts.length === 0 ? (
-            <p className="p-4 text-sm text-stone-600">No workouts logged yet.</p>
-          ) : (
-            <div className="divide-y divide-stone-200">
-              {column.workouts.map((workout) => (
-                <article key={workout.id} className="p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm text-stone-500">
-                        {new Date(`${workout.workout_date}T00:00:00`).toLocaleDateString()}
-                      </p>
-                      <h4 className="mt-1 break-words font-semibold">{workout.title}</h4>
-                    </div>
-                    <span className="shrink-0 text-sm font-medium text-amber-800">{workout.duration_minutes} min</span>
-                  </div>
-                  {workout.notes ? <p className="mt-3 break-words whitespace-pre-line text-sm text-stone-700">{workout.notes}</p> : null}
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-      ))}
+    <>
+      <MobileWorkoutFeed columns={columns} defaultUserId={defaultUserId} />
+      <div className="hidden gap-4 md:grid md:grid-cols-2 xl:grid-cols-3">
+        {columns.map((column) => <WorkoutColumnCard key={column.profile.id} column={column} />)}
+      </div>
+    </>
+  )
+}
+
+function MobileWorkoutFeed({ columns, defaultUserId }: { columns: CrewColumn[]; defaultUserId: string }) {
+  const [selectedUserId, setSelectedUserId] = useState(defaultUserId)
+  const selectedColumn = columns.find((column) => column.profile.id === selectedUserId) ?? columns[0]
+
+  return (
+    <div className="md:hidden">
+      <div aria-label="Crew members" className="-mx-3 overflow-x-auto px-3 pb-3" role="tablist">
+        <div className="flex w-max min-w-full gap-2">
+          {columns.map((column) => {
+            const isSelected = column.profile.id === selectedColumn.profile.id
+
+            return (
+              <button
+                aria-controls={`member-workouts-${column.profile.id}`}
+                aria-selected={isSelected}
+                className={isSelected ? 'button-primary whitespace-nowrap' : 'button-secondary whitespace-nowrap'}
+                id={`member-tab-${column.profile.id}`}
+                key={column.profile.id}
+                onClick={() => setSelectedUserId(column.profile.id)}
+                role="tab"
+                type="button"
+              >
+                {column.profile.display_name}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <div
+        aria-labelledby={`member-tab-${selectedColumn.profile.id}`}
+        id={`member-workouts-${selectedColumn.profile.id}`}
+        role="tabpanel"
+      >
+        <WorkoutColumnCard column={selectedColumn} />
+      </div>
     </div>
+  )
+}
+
+function WorkoutColumnCard({ column }: { column: CrewColumn }) {
+  return (
+    <section className="overflow-hidden rounded border border-stone-200 bg-white shadow-sm">
+      <header className="border-b border-stone-200 bg-stone-50 p-4">
+        <h3 className="break-words text-xl font-semibold">{column.profile.display_name}</h3>
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm text-stone-600">
+          <span><strong className="font-semibold text-stone-950">{column.workouts.length}</strong> workouts</span>
+          <span><strong className="font-semibold text-stone-950">{column.totalMinutes}</strong> min</span>
+        </div>
+      </header>
+      {column.workouts.length === 0 ? (
+        <p className="p-4 text-sm text-stone-600">No workouts logged yet.</p>
+      ) : (
+        <div className="divide-y divide-stone-200">
+          {column.workouts.map((workout) => (
+            <article key={workout.id} className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm text-stone-500">
+                    {new Date(`${workout.workout_date}T00:00:00`).toLocaleDateString()}
+                  </p>
+                  <h4 className="mt-1 break-words font-semibold">{workout.title}</h4>
+                </div>
+                <span className="shrink-0 text-sm font-medium text-amber-800">{workout.duration_minutes} min</span>
+              </div>
+              {workout.notes ? <p className="mt-3 break-words whitespace-pre-line text-sm text-stone-700">{workout.notes}</p> : null}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
