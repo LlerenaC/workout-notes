@@ -24,6 +24,9 @@ create table if not exists public.workouts (
   created_at timestamptz not null default now()
 );
 
+create index if not exists workouts_workout_date_created_at_idx
+  on public.workouts (workout_date desc, created_at desc);
+
 -- Adds the column for projects created before display names were stored on workouts.
 alter table public.workouts
   add column if not exists display_name text;

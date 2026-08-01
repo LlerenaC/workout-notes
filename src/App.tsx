@@ -21,7 +21,36 @@ const displayNameSchema = z.string().trim().min(2, 'Display name must be at leas
 type WorkoutFormInput = z.input<typeof workoutSchema>
 type WorkoutFormValues = z.output<typeof workoutSchema>
 
-const today = new Date().toISOString().slice(0, 10)
+const today = toDateInput(new Date())
+const currentWeekStart = weekStartForDate(new Date())
+
+function toDateInput(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function dateFromInput(value: string) {
+  return new Date(`${value}T00:00:00`)
+}
+
+function weekStartForDate(date: Date) {
+  const start = new Date(date)
+  start.setHours(0, 0, 0, 0)
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7))
+  return toDateInput(start)
+}
+
+function addDays(dateValue: string, days: number) {
+  const date = dateFromInput(dateValue)
+  date.setDate(date.getDate() + days)
+  return toDateInput(date)
+}
+
+function weeksBetween(start: string, end: string) {
+  return Math.round((dateFromInput(end).getTime() - dateFromInput(start).getTime()) / (7 * 24 * 60 * 60 * 1000))
+}
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
@@ -132,9 +161,11 @@ function Dashboard({
 }) {
   const queryClient = useQueryClient()
   const [workoutFormVersion, setWorkoutFormVersion] = useState(0)
+  const [selectedWeekStart, setSelectedWeekStart] = useState(currentWeekStart)
   const profileQuery = useProfile(session.user.id)
   const crewProfilesQuery = useCrewProfiles(Boolean(profileQuery.data))
-  const workoutsQuery = useWorkouts(Boolean(profileQuery.data))
+  const earliestWorkoutQuery = useEarliestWorkoutDate(Boolean(profileQuery.data))
+  const workoutsQuery = useWorkouts(Boolean(profileQuery.data), selectedWeekStart)
 
   const totalMinutes = useMemo(
     () => workoutsQuery.data?.reduce((sum, workout) => sum + workout.duration_minutes, 0) ?? 0,
@@ -162,6 +193,56 @@ function Dashboard({
     onSuccess: () => {
       setWorkoutFormVersion((version) => version + 1)
       void queryClient.invalidateQueries({ queryKey: ['workouts'] })
+      void queryClient.invalidateQueries({ queryKey: ['earliest-workout-date'] })
+    },
+  })
+
+  const updateWorkout = useMutation({
+    mutationFn: async ({ id, ...values }: WorkoutFormValues & { id: string }) => {
+      const { data, error } = await supabase
+        .from('workouts')
+        .update({
+          title: values.title,
+          workout_date: values.workout_date,
+          duration_minutes: values.duration_minutes,
+          notes: values.notes || null,
+        })
+        .eq('id', id)
+        .eq('user_id', session.user.id)
+        .select('id, user_id, display_name, workout_date, title, notes, duration_minutes, created_at')
+        .single()
+
+      if (error) {
+        throw error
+      }
+
+      return data as Workout
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['workouts'] })
+      void queryClient.invalidateQueries({ queryKey: ['earliest-workout-date'] })
+    },
+  })
+
+  const deleteWorkout = useMutation({
+    mutationFn: async (workoutId: string) => {
+      const { data, error } = await supabase
+        .from('workouts')
+        .delete()
+        .eq('id', workoutId)
+        .eq('user_id', session.user.id)
+        .select('id')
+        .single()
+
+      if (error) {
+        throw error
+      }
+
+      return data.id
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['workouts'] })
+      void queryClient.invalidateQueries({ queryKey: ['earliest-workout-date'] })
     },
   })
 
@@ -171,20 +252,21 @@ function Dashboard({
         .from('profiles')
         .update({ display_name: displayName })
         .eq('id', session.user.id)
-        .select('id')
+        .select('id, display_name')
+        .single()
 
       if (error) {
         throw error
       }
 
-      if (data.length === 0) {
-        throw new Error('Your display name could not be updated. Confirm the profile update policy has been applied in Supabase.')
-      }
+      return data as Profile
     },
-    onSuccess: () => Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['profile', session.user.id] }),
-      queryClient.invalidateQueries({ queryKey: ['crew-profiles'] }),
-    ]),
+    onSuccess: (updatedProfile) => {
+      queryClient.setQueryData<Profile>(['profile', session.user.id], updatedProfile)
+      queryClient.setQueryData<Profile[]>(['crew-profiles'], (profiles) =>
+        profiles?.map((profile) => profile.id === updatedProfile.id ? updatedProfile : profile),
+      )
+    },
   })
 
   if (profileQuery.isLoading) {
@@ -209,11 +291,11 @@ function Dashboard({
     )
   }
 
-  if (crewProfilesQuery.error || workoutsQuery.error) {
+  if (crewProfilesQuery.error || earliestWorkoutQuery.error || workoutsQuery.error) {
     return (
       <StatusScreen
         title="Could not load the workout feed"
-        message={(crewProfilesQuery.error ?? workoutsQuery.error)?.message ?? 'Try refreshing the page.'}
+        message={(crewProfilesQuery.error ?? earliestWorkoutQuery.error ?? workoutsQuery.error)?.message ?? 'Try refreshing the page.'}
       />
     )
   }
@@ -243,14 +325,21 @@ function Dashboard({
           </div>
         </div>
 
-        {workoutsQuery.isLoading || crewProfilesQuery.isLoading ? (
+        {workoutsQuery.isLoading || crewProfilesQuery.isLoading || earliestWorkoutQuery.isLoading ? (
           <StatusScreen title="Loading" message="Pulling recent workouts..." />
         ) : (
           <WorkoutFeed
             columns={crewColumns}
             currentUserId={profileQuery.data.id}
+            earliestWorkoutDate={earliestWorkoutQuery.data}
+            isDeletingWorkout={deleteWorkout.isPending}
             isUpdatingDisplayName={updateDisplayName.isPending}
-            onUpdateDisplayName={(displayName) => updateDisplayName.mutateAsync(displayName)}
+            isUpdatingWorkout={updateWorkout.isPending}
+            onDeleteWorkout={(workoutId) => deleteWorkout.mutateAsync(workoutId).then(() => undefined)}
+            onSelectWeek={setSelectedWeekStart}
+            onUpdateDisplayName={(displayName) => updateDisplayName.mutateAsync(displayName).then(() => undefined)}
+            onUpdateWorkout={(workout, values) => updateWorkout.mutateAsync({ id: workout.id, ...values }).then(() => undefined)}
+            selectedWeekStart={selectedWeekStart}
           />
         )}
       </section>
@@ -311,14 +400,39 @@ function useProfile(userId: string) {
   })
 }
 
-function useWorkouts(enabled: boolean) {
+function useEarliestWorkoutDate(enabled: boolean) {
   return useQuery({
     enabled,
-    queryKey: ['workouts'],
+    queryKey: ['earliest-workout-date'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('workouts')
+        .select('workout_date')
+        .order('workout_date', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+
+      if (error) {
+        throw error
+      }
+
+      return data?.workout_date
+    },
+  })
+}
+
+function useWorkouts(enabled: boolean, weekStart: string) {
+  const weekEnd = addDays(weekStart, 7)
+
+  return useQuery({
+    enabled,
+    queryKey: ['workouts', weekStart],
     queryFn: async () => {
       const { data, error } = await supabase
         .from('workouts')
         .select('id, user_id, display_name, workout_date, title, notes, duration_minutes, created_at')
+        .gte('workout_date', weekStart)
+        .lt('workout_date', weekEnd)
         .order('workout_date', { ascending: false })
         .order('created_at', { ascending: false })
 
@@ -506,13 +620,27 @@ function createCrewColumns(profiles: Profile[], workouts: Workout[]): CrewColumn
 function WorkoutFeed({
   columns,
   currentUserId,
+  earliestWorkoutDate,
+  isDeletingWorkout,
   isUpdatingDisplayName,
+  isUpdatingWorkout,
+  onDeleteWorkout,
+  onSelectWeek,
   onUpdateDisplayName,
+  onUpdateWorkout,
+  selectedWeekStart,
 }: {
   columns: CrewColumn[]
   currentUserId: string
+  earliestWorkoutDate?: string
+  isDeletingWorkout: boolean
   isUpdatingDisplayName: boolean
+  isUpdatingWorkout: boolean
+  onDeleteWorkout: (workoutId: string) => Promise<void>
+  onSelectWeek: (weekStart: string) => void
   onUpdateDisplayName: (displayName: string) => Promise<void>
+  onUpdateWorkout: (workout: Workout, values: WorkoutFormValues) => Promise<void>
+  selectedWeekStart: string
 }) {
   if (columns.length === 0) {
     return (
@@ -525,20 +653,33 @@ function WorkoutFeed({
 
   return (
     <>
+      <WeekSelector
+        earliestWorkoutDate={earliestWorkoutDate}
+        onSelectWeek={onSelectWeek}
+        selectedWeekStart={selectedWeekStart}
+      />
       <MobileWorkoutFeed
         columns={columns}
         currentUserId={currentUserId}
+        isDeletingWorkout={isDeletingWorkout}
         isUpdatingDisplayName={isUpdatingDisplayName}
+        isUpdatingWorkout={isUpdatingWorkout}
+        onDeleteWorkout={onDeleteWorkout}
         onUpdateDisplayName={onUpdateDisplayName}
+        onUpdateWorkout={onUpdateWorkout}
       />
       <div className="hidden gap-4 md:grid md:grid-cols-2 xl:grid-cols-3">
         {columns.map((column) => (
           <WorkoutColumnCard
             column={column}
             isCurrentUser={column.profile.id === currentUserId}
+            isDeletingWorkout={isDeletingWorkout}
             isUpdatingDisplayName={isUpdatingDisplayName}
+            isUpdatingWorkout={isUpdatingWorkout}
             key={column.profile.id}
+            onDeleteWorkout={onDeleteWorkout}
             onUpdateDisplayName={onUpdateDisplayName}
+            onUpdateWorkout={onUpdateWorkout}
           />
         ))}
       </div>
@@ -546,16 +687,93 @@ function WorkoutFeed({
   )
 }
 
+function WeekSelector({
+  earliestWorkoutDate,
+  onSelectWeek,
+  selectedWeekStart,
+}: {
+  earliestWorkoutDate?: string
+  onSelectWeek: (weekStart: string) => void
+  selectedWeekStart: string
+}) {
+  const earliestWeekStart = earliestWorkoutDate ? weekStartForDate(dateFromInput(earliestWorkoutDate)) : currentWeekStart
+  const availableWeekCount = Math.max(0, weeksBetween(earliestWeekStart, currentWeekStart))
+  const selectedWeekIndex = Math.min(
+    availableWeekCount,
+    Math.max(0, weeksBetween(earliestWeekStart, selectedWeekStart)),
+  )
+  const weekEnd = addDays(selectedWeekStart, 6)
+  const weekLabel = `${dateFromInput(selectedWeekStart).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${dateFromInput(weekEnd).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+
+  return (
+    <section aria-label="Workout week" className="rounded border border-stone-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm text-stone-500">Showing week</p>
+          <h2 className="text-lg font-semibold">{weekLabel}</h2>
+        </div>
+        <button
+          className="button-secondary"
+          disabled={selectedWeekStart === currentWeekStart}
+          type="button"
+          onClick={() => onSelectWeek(currentWeekStart)}
+        >
+          This week
+        </button>
+      </div>
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          aria-label="Show previous week"
+          className="button-secondary"
+          disabled={selectedWeekIndex === 0}
+          type="button"
+          onClick={() => onSelectWeek(addDays(selectedWeekStart, -7))}
+        >
+          ←
+        </button>
+        <input
+          aria-label="Select workout week"
+          className="min-w-0 flex-1 accent-emerald-600"
+          disabled={availableWeekCount === 0}
+          max={availableWeekCount}
+          min="0"
+          step="1"
+          type="range"
+          value={selectedWeekIndex}
+          onChange={(event) => onSelectWeek(addDays(earliestWeekStart, Number(event.target.value) * 7))}
+        />
+        <button
+          aria-label="Show next week"
+          className="button-secondary"
+          disabled={selectedWeekStart === currentWeekStart}
+          type="button"
+          onClick={() => onSelectWeek(addDays(selectedWeekStart, 7))}
+        >
+          →
+        </button>
+      </div>
+    </section>
+  )
+}
+
 function MobileWorkoutFeed({
   columns,
   currentUserId,
+  isDeletingWorkout,
   isUpdatingDisplayName,
+  isUpdatingWorkout,
+  onDeleteWorkout,
   onUpdateDisplayName,
+  onUpdateWorkout,
 }: {
   columns: CrewColumn[]
   currentUserId: string
+  isDeletingWorkout: boolean
   isUpdatingDisplayName: boolean
+  isUpdatingWorkout: boolean
+  onDeleteWorkout: (workoutId: string) => Promise<void>
   onUpdateDisplayName: (displayName: string) => Promise<void>
+  onUpdateWorkout: (workout: Workout, values: WorkoutFormValues) => Promise<void>
 }) {
   const [selectedUserId, setSelectedUserId] = useState(currentUserId)
   const selectedColumn = columns.find((column) => column.profile.id === selectedUserId) ?? columns[0]
@@ -592,8 +810,12 @@ function MobileWorkoutFeed({
         <WorkoutColumnCard
           column={selectedColumn}
           isCurrentUser={selectedColumn.profile.id === currentUserId}
+          isDeletingWorkout={isDeletingWorkout}
           isUpdatingDisplayName={isUpdatingDisplayName}
+          isUpdatingWorkout={isUpdatingWorkout}
+          onDeleteWorkout={onDeleteWorkout}
           onUpdateDisplayName={onUpdateDisplayName}
+          onUpdateWorkout={onUpdateWorkout}
         />
       </div>
     </div>
@@ -603,13 +825,21 @@ function MobileWorkoutFeed({
 function WorkoutColumnCard({
   column,
   isCurrentUser,
+  isDeletingWorkout,
   isUpdatingDisplayName,
+  isUpdatingWorkout,
+  onDeleteWorkout,
   onUpdateDisplayName,
+  onUpdateWorkout,
 }: {
   column: CrewColumn
   isCurrentUser: boolean
+  isDeletingWorkout: boolean
   isUpdatingDisplayName: boolean
+  isUpdatingWorkout: boolean
+  onDeleteWorkout: (workoutId: string) => Promise<void>
   onUpdateDisplayName: (displayName: string) => Promise<void>
+  onUpdateWorkout: (workout: Workout, values: WorkoutFormValues) => Promise<void>
 }) {
   return (
     <section className="overflow-hidden rounded border border-stone-200 bg-white shadow-sm">
@@ -633,23 +863,164 @@ function WorkoutColumnCard({
       ) : (
         <div className="divide-y divide-stone-200">
           {column.workouts.map((workout) => (
-            <article key={workout.id} className="p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm text-stone-500">
-                    {new Date(`${workout.workout_date}T00:00:00`).toLocaleDateString()}
-                  </p>
-                  <h4 className="mt-1 break-words font-semibold">{workout.title}</h4>
-                </div>
-                <span className="shrink-0 text-sm font-medium text-amber-800">{workout.duration_minutes} min</span>
-              </div>
-              {workout.notes ? <p className="mt-3 break-words whitespace-pre-line text-sm text-stone-700">{workout.notes}</p> : null}
-            </article>
+            <EditableWorkout
+              canManage={isCurrentUser}
+              isDeleting={isDeletingWorkout}
+              isSaving={isUpdatingWorkout}
+              key={workout.id}
+              onDelete={onDeleteWorkout}
+              onSave={onUpdateWorkout}
+              workout={workout}
+            />
           ))}
         </div>
       )}
     </section>
   )
+}
+
+function EditableWorkout({
+  canManage,
+  isDeleting,
+  isSaving,
+  onDelete,
+  onSave,
+  workout,
+}: {
+  canManage: boolean
+  isDeleting: boolean
+  isSaving: boolean
+  onDelete: (workoutId: string) => Promise<void>
+  onSave: (workout: Workout, values: WorkoutFormValues) => Promise<void>
+  workout: Workout
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const {
+    formState: { errors },
+    handleSubmit,
+    register,
+    reset,
+  } = useForm<WorkoutFormInput, unknown, WorkoutFormValues>({
+    defaultValues: workoutToFormValues(workout),
+    resolver: zodResolver(workoutSchema),
+  })
+
+  const cancel = () => {
+    reset(workoutToFormValues(workout))
+    setError(null)
+    setIsEditing(false)
+  }
+
+  const save = async (values: WorkoutFormValues) => {
+    setError(null)
+
+    try {
+      await onSave(workout, values)
+      setIsEditing(false)
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Could not update this workout.')
+    }
+  }
+
+  const remove = async () => {
+    if (!window.confirm(`Delete “${workout.title}”? This cannot be undone.`)) {
+      return
+    }
+
+    setError(null)
+
+    try {
+      await onDelete(workout.id)
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Could not delete this workout.')
+    }
+  }
+
+  if (isEditing) {
+    return (
+      <form className="space-y-4 p-4" onSubmit={handleSubmit(save)}>
+        <label className="form-field">
+          <span>Title</span>
+          <input {...register('title')} />
+          {errors.title ? <small>{errors.title.message}</small> : null}
+        </label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="form-field">
+            <span>Date</span>
+            <input type="date" {...register('workout_date')} />
+            {errors.workout_date ? <small>{errors.workout_date.message}</small> : null}
+          </label>
+          <label className="form-field">
+            <span>Minutes</span>
+            <input type="number" min="1" max="600" {...register('duration_minutes')} />
+            {errors.duration_minutes ? <small>{errors.duration_minutes.message}</small> : null}
+          </label>
+        </div>
+        <label className="form-field">
+          <span>Notes</span>
+          <textarea rows={5} {...register('notes')} />
+          {errors.notes ? <small>{errors.notes.message}</small> : null}
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <button className="button-primary" disabled={isSaving} type="submit">
+            {isSaving ? 'Saving...' : 'Save changes'}
+          </button>
+          <button className="button-secondary" disabled={isSaving} type="button" onClick={cancel}>Cancel</button>
+        </div>
+        {error ? <p className="text-sm text-red-700">{error}</p> : null}
+      </form>
+    )
+  }
+
+  return (
+    <article className="p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm text-stone-500">
+            {new Date(`${workout.workout_date}T00:00:00`).toLocaleDateString()}
+          </p>
+          <h4 className="mt-1 break-words font-semibold">{workout.title}</h4>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <span className="text-sm font-medium text-amber-800">{workout.duration_minutes} min</span>
+          {canManage ? (
+            <>
+              <button
+                aria-label={`Edit ${workout.title}`}
+                className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-950 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                disabled={isDeleting || isSaving}
+                type="button"
+                onClick={() => setIsEditing(true)}
+              >
+                <span aria-hidden="true">✎</span>
+              </button>
+              <button
+                aria-label={`Delete ${workout.title}`}
+                className="rounded p-1 text-stone-500 hover:bg-red-100 hover:text-red-700 focus:outline-none focus:ring-2 focus:ring-red-600"
+                disabled={isDeleting || isSaving}
+                type="button"
+                onClick={remove}
+              >
+                <span aria-hidden="true">🗑</span>
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+      {workout.notes ? <p className="mt-3 break-words whitespace-pre-line text-sm text-stone-700">{workout.notes}</p> : null}
+      {error ? <p className="mt-3 text-sm text-red-700">{error}</p> : null}
+    </article>
+  )
+}
+
+function workoutToFormValues(workout: Workout): WorkoutFormValues {
+  return {
+    duration_minutes: workout.duration_minutes,
+    notes: workout.notes ?? '',
+    title: workout.title,
+    workout_date: workout.workout_date,
+  }
 }
 
 function EditableDisplayName({
